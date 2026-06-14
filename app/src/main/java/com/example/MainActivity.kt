@@ -103,11 +103,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startPlayerService() {
         val intent = Intent(this, AudiobookPlayerService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
+        startService(intent)
     }
 
     private fun checkAndRequestPermissions() {

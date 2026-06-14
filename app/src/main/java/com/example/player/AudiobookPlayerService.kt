@@ -154,9 +154,14 @@ class AudiobookPlayerService : MediaSessionService() {
 
         // Assemble playlist
         currentTracks.forEach { track ->
+            val uri = if (track.filePath.startsWith("http") || track.filePath.startsWith("content://") || track.filePath.startsWith("file://")) {
+                android.net.Uri.parse(track.filePath)
+            } else {
+                android.net.Uri.fromFile(java.io.File(track.filePath))
+            }
             val mediaItem = MediaItem.Builder()
                 .setMediaId(track.id.toString())
-                .setUri(track.filePath)
+                .setUri(uri)
                 .setMediaMetadata(
                     androidx.media3.common.MediaMetadata.Builder()
                         .setTitle(track.title)
