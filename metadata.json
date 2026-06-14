@@ -1,0 +1,6 @@
+{
+  "name": "Audiobook Player",
+  "description": "An offline MP3 player featuring automatic intro/outro skipping, playback history, and speed controls for audiobooks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
