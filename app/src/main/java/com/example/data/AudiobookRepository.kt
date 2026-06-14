@@ -56,12 +56,74 @@ class AudiobookRepository(private val db: AudiobookDatabase) {
     }
 
     /**
-     * Scans the external directories and parses books
+     * Scans the external directories and parses books using MediaStore and a recursive direct file scan.
      */
     suspend fun scanLocalDirectories(context: Context): Int = withContext(Dispatchers.IO) {
+        val booksMap = mutableMapOf<String, MutableList<Track>>()
+
+        // --- Phase 1: Scan using MediaStore ---
+        try {
+            val uri = android.provider.MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            val projection = arrayOf(
+                android.provider.MediaStore.Audio.Media.DATA,
+                android.provider.MediaStore.Audio.Media.DISPLAY_NAME,
+                android.provider.MediaStore.Audio.Media.DURATION,
+                android.provider.MediaStore.Audio.Media.TITLE
+            )
+            val selection = "${android.provider.MediaStore.Audio.Media.SIZE} > 0"
+            context.contentResolver.query(uri, projection, selection, null, null)?.use { cursor ->
+                val dataIndex = cursor.getColumnIndex(android.provider.MediaStore.Audio.Media.DATA)
+                val nameIndex = cursor.getColumnIndex(android.provider.MediaStore.Audio.Media.DISPLAY_NAME)
+                val durationIndex = cursor.getColumnIndex(android.provider.MediaStore.Audio.Media.DURATION)
+                val titleIndex = cursor.getColumnIndex(android.provider.MediaStore.Audio.Media.TITLE)
+
+                while (cursor.moveToNext()) {
+                    val filePath = if (dataIndex != -1) cursor.getString(dataIndex) else null
+                    if (filePath.isNullOrBlank()) continue
+
+                    val lower = filePath.lowercase()
+                    if (!lower.endsWith(".mp3") && !lower.endsWith(".wav") && !lower.endsWith(".m4a") && 
+                        !lower.endsWith(".aac") && !lower.endsWith(".flac") && !lower.endsWith(".ogg") &&
+                        !lower.endsWith(".opus") && !lower.endsWith(".wma")) {
+                        continue
+                    }
+
+                    // Skip system files
+                    if (filePath.contains("/Android/data/") || filePath.contains("/Ringtones/") || 
+                        filePath.contains("/Notifications/") || filePath.contains("/Alarms/")) {
+                        continue
+                    }
+
+                    val file = File(filePath)
+                    val parentFile = file.parentFile ?: continue
+                    val parentPath = parentFile.absolutePath
+
+                    val title = if (titleIndex != -1) cursor.getString(titleIndex) else null
+                    val displayName = if (nameIndex != -1) cursor.getString(nameIndex) else null
+                    val trackTitle = if (!title.isNullOrBlank()) title else (displayName?.substringBeforeLast('.') ?: file.nameWithoutExtension)
+                    
+                    val duration = if (durationIndex != -1) cursor.getLong(durationIndex) else 0L
+                    val finalDuration = if (duration <= 0L) estimateDuration(file) else duration
+
+                    val track = Track(
+                        bookId = 0,
+                        title = trackTitle,
+                        filePath = filePath,
+                        durationMs = finalDuration,
+                        trackNumber = 0
+                    )
+
+                    val list = booksMap.getOrPut(parentPath) { mutableListOf() }
+                    list.add(track)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("AudiobookRepository", "MediaStore scan error: ${e.message}", e)
+        }
+
+        // --- Phase 2: Recursive File Scanning for specific storage folders ---
         val rootDirs = mutableListOf<File>()
         
-        // Scan standard shared music fold
         val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
         if (musicDir.exists() && musicDir.isDirectory) rootDirs.add(musicDir)
 
@@ -71,50 +133,86 @@ class AudiobookRepository(private val db: AudiobookDatabase) {
         val appDir = context.getExternalFilesDir(Environment.DIRECTORY_MUSIC)
         if (appDir != null && appDir.exists()) rootDirs.add(appDir)
 
+        fun findAudioFilesRecursively(dir: File) {
+            val files = dir.listFiles() ?: return
+            val audioInThisDir = mutableListOf<Track>()
+            
+            for (file in files) {
+                if (file.isDirectory) {
+                    findAudioFilesRecursively(file)
+                } else if (file.isFile) {
+                    val name = file.name.lowercase()
+                    if (name.endsWith(".mp3") || name.endsWith(".wav") || name.endsWith(".m4a") || 
+                        name.endsWith(".aac") || name.endsWith(".flac") || name.endsWith(".ogg") ||
+                        name.endsWith(".opus") || name.endsWith(".wma")) {
+                        val track = Track(
+                            bookId = 0,
+                            title = file.nameWithoutExtension,
+                            filePath = file.absolutePath,
+                            durationMs = estimateDuration(file),
+                            trackNumber = 0
+                        )
+                        audioInThisDir.add(track)
+                    }
+                }
+            }
+            if (audioInThisDir.isNotEmpty()) {
+                val list = booksMap.getOrPut(dir.absolutePath) { mutableListOf() }
+                val existingPaths = list.map { it.filePath }.toSet()
+                for (track in audioInThisDir) {
+                    if (track.filePath !in existingPaths) {
+                        list.add(track)
+                    }
+                }
+            }
+        }
+
+        // Scan the root directories recursively
+        for (rootDir in rootDirs) {
+            findAudioFilesRecursively(rootDir)
+        }
+
+        // --- Phase 3: Insert books and tracks into DB ---
         var importedCount = 0
 
-        for (rootDir in rootDirs) {
-            val subdirs = rootDir.listFiles { file -> file.isDirectory } ?: continue
-            for (subdir in subdirs) {
-                // Check if directory contains playables
-                val audioFiles = subdir.listFiles { file -> 
-                    file.isFile && (file.name.endsWith(".mp3", true) || file.name.endsWith(".wav", true) || file.name.endsWith(".m4a", true))
-                } ?: continue
+        for ((parentPath, tracksList) in booksMap) {
+            if (tracksList.isEmpty()) continue
 
-                if (audioFiles.isEmpty()) continue
+            // Check if book already exists
+            val existingBook = dao.getBookByFolderPath(parentPath)
+            if (existingBook != null) continue
 
-                // Check if book already exists
-                val existingBook = dao.getBookByFolderPath(subdir.absolutePath)
-                if (existingBook != null) continue
-
-                // Sort audio files naturally/alphabetically
-                val sortedFiles = audioFiles.sortedWith { f1, f2 ->
-                    naturalCompare(f1.name, f2.name)
-                }
-
-                val bookTitle = subdir.name
-                val bookId = dao.insertBook(
-                    Book(
-                        title = bookTitle,
-                        folderPath = subdir.absolutePath,
-                        coverColorHex = getColorForTitle(bookTitle),
-                        lastPlayedTimestamp = System.currentTimeMillis()
-                    )
-                )
-
-                val tracks = sortedFiles.mapIndexed { index, file ->
-                    Track(
-                        bookId = bookId,
-                        title = file.nameWithoutExtension,
-                        filePath = file.absolutePath,
-                        durationMs = estimateDuration(file),
-                        trackNumber = index + 1
-                    )
-                }
-                
-                dao.insertTracks(tracks)
-                importedCount++
+            val parentFile = File(parentPath)
+            var bookTitle = parentFile.name
+            if (bookTitle.isBlank()) {
+                bookTitle = "未知有声书"
             }
+
+            // Sort audio files naturally/alphabetically by filename to ensure correct chapter reading order
+            val sortedTracksList = tracksList.sortedWith { t1, t2 ->
+                val name1 = File(t1.filePath).name
+                val name2 = File(t2.filePath).name
+                naturalCompare(name1, name2)
+            }
+
+            val bookId = dao.insertBook(
+                Book(
+                    title = bookTitle,
+                    folderPath = parentPath,
+                    coverColorHex = getColorForTitle(bookTitle),
+                    lastPlayedTimestamp = System.currentTimeMillis()
+                )
+            )
+
+            val tracks = sortedTracksList.mapIndexed { index, track ->
+                track.copy(
+                    bookId = bookId,
+                    trackNumber = index + 1
+                )
+            }
+            
+            dao.insertTracks(tracks)
+            importedCount++
         }
 
         importedCount

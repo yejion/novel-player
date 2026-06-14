@@ -303,9 +303,11 @@ class AudiobookPlayerService : MediaSessionService() {
     private fun saveHistory(trackIndex: Int, positionMs: Long) {
         val book = currentBook ?: return
         serviceScope.launch {
-            repository.savePlaybackProgress(book.id, trackIndex, positionMs)
-            // Update cached object in memory
-            currentBook = repository.getBookById(book.id)
+            if (book.id != -99L) {
+                repository.savePlaybackProgress(book.id, trackIndex, positionMs)
+                // Update cached object in memory
+                currentBook = repository.getBookById(book.id)
+            }
         }
     }
 

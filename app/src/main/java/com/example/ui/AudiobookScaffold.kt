@@ -368,14 +368,54 @@ fun BooksShelfScreen(
                 }
             }
         } else {
-            // Book List
-            Text(
-                text = "我的藏书 (${allBooks.size})",
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFF1A1C1E),
-                fontSize = 15.sp,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
+            // Book List Header with Play All Queue action
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "我的藏书 (${allBooks.size})",
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF1A1C1E),
+                    fontSize = 15.sp
+                )
+
+                TextButton(
+                    onClick = {
+                        val allTracks = allBooks.flatMap { it.sortedTracks }
+                        if (allTracks.isNotEmpty()) {
+                            val virtualBook = Book(
+                                id = -99L,
+                                title = "全部本地音频队列",
+                                folderPath = "all_local_scanned_audios",
+                                coverColorHex = "#6750A4",
+                                lastPlayedTimestamp = System.currentTimeMillis()
+                            )
+                            viewModel.playBook(virtualBook, allTracks, 0)
+                            navController.navigate("now_playing")
+                            Toast.makeText(context, "已成功将所有扫描到的音频形成队列，并开始顺序播放！", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "未检索到本地音频！", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = accentColor)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "播放全部",
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "播放全部 (${allBooks.sumOf { it.sortedTracks.size }}集/首)",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
 
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -473,6 +513,30 @@ fun BooksShelfScreen(
                                         style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, color = Color(0xFF49454F))
                                     )
                                 }
+                            }
+
+                            Spacer(modifier = Modifier.width(10.dp))
+                            IconButton(
+                                onClick = {
+                                    if (isCurrentBook) {
+                                        viewModel.togglePlayPause()
+                                    } else {
+                                        viewModel.playBook(book, sortedTracks, -1)
+                                        navController.navigate("now_playing")
+                                    }
+                                },
+                                modifier = Modifier
+                                    .background(if (isCurrentBook && activePlayerState.isPlaying) accentColor.copy(alpha = 0.15f) else accentColor, CircleShape)
+                                    .size(40.dp)
+                            ) {
+                                val buttonIcon = if (isCurrentBook && activePlayerState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow
+                                val buttonTint = if (isCurrentBook && activePlayerState.isPlaying) accentColor else Color.White
+                                Icon(
+                                    imageVector = buttonIcon,
+                                    contentDescription = "直接试听起播",
+                                    tint = buttonTint,
+                                    modifier = Modifier.size(24.dp)
+                                )
                             }
                         }
                     }
@@ -965,7 +1029,22 @@ fun NowPlayingScreen(
     navController: NavController,
     accentColor: Color
 ) {
-    val activeBook = allBooks.find { it.book.id == playerState.bookId } ?: return
+    val activeBook = if (playerState.bookId == -99L) {
+        val allSortedTracks = allBooks.flatMap { it.sortedTracks }.mapIndexed { idx, track ->
+            track.copy(trackNumber = idx + 1)
+        }
+        BookWithTracks(
+            book = Book(
+                id = -99L,
+                title = "全部本地音频",
+                folderPath = "all_local_scanned_audios",
+                coverColorHex = "#6750A4"
+            ),
+            tracks = allSortedTracks
+        )
+    } else {
+        allBooks.find { it.book.id == playerState.bookId } ?: return
+    }
     val currentTrack = activeBook.sortedTracks.getOrNull(playerState.currentTrackIndex) ?: return
 
     var showSpeedSliderDialog by remember { mutableStateOf(false) }
@@ -1013,8 +1092,12 @@ fun NowPlayingScreen(
                 )
             }
 
-            IconButton(onClick = { navController.navigate("detail/${activeBook.book.id}") }) {
-                Icon(imageVector = Icons.Default.Info, contentDescription = "有声书设置", tint = Color(0xFF6750A4))
+            if (activeBook.book.id != -99L) {
+                IconButton(onClick = { navController.navigate("detail/${activeBook.book.id}") }) {
+                    Icon(imageVector = Icons.Default.Info, contentDescription = "有声书设置", tint = Color(0xFF6750A4))
+                }
+            } else {
+                Spacer(modifier = Modifier.width(48.dp))
             }
         }
 
